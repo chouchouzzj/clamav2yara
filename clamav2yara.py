@@ -143,7 +143,7 @@ def is_hex(string_t):
     True: 16进制字符串
     False: ascii 字符串
     """
-    regex = re.compile(r'[^0-9a-f\(\)\[\]\?|]')
+    regex = re.compile(r'[^0-9a-fA-F\(\)\[\]\?\*|-]')
     matches = re.findall(regex, string_t)
     return len(matches) == 0
 
@@ -233,7 +233,6 @@ def formatLDB(string_t, index=0):
         modifiers = " ".join(s)
         
         string_t = handle_hex(hexstring)
-        string_t = string_t.replace("\"", "\\\"")
         string_t = repl(string_t, {
             "\\": "\\\\",
             "\"": "\\\""
@@ -577,17 +576,17 @@ if args.i and args.o:
     OUTPUT = args.o
     TYPE = get_file_ext(INPUT)[1:].upper()
 
-    if TYPE in ["HDB", "HSB"]:
-        setup(OUTPUT)
-
     limit = sum(1 for line in open(INPUT, 'r'))
     with open(INPUT, 'r') as f:
         c = 0
         for line in f:
             if c%100000 == 0:
                 OUTPUTFILE =  OUTPUT.replace('.', f"_{int(c/100000)}.")
+            
             if not os.path.exists(OUTPUTFILE):
                 write(OUTPUTFILE, "import \"pe\"\n")
+                if TYPE in ["HDB", "HSB"]:
+                    setup(OUTPUTFILE)
             yara_rule = MODES[TYPE](line)
             if len(yara_rule) > 1:
                 write(OUTPUTFILE, yara_rule)
@@ -595,7 +594,7 @@ if args.i and args.o:
                 c += 1
             else:
                 write('error.ldb', line)
-
+    print()
 elif args.a:
     for t in EXTENSIONS:
         TYPE = t[1:].upper()
