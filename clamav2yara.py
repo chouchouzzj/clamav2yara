@@ -18,6 +18,49 @@ import os
 from ignored import *
 
 
+
+# VARIABLES
+INPUT = None
+OUTPUT = None
+TYPE = None
+URL = "http://database.clamav.net/daily.cvd"
+DB_FILE = "daily.cvd"
+EXTENSIONS = ['.ndu', '.ndb', '.hdb', '.hsb', '.ldb']
+
+FORMAT = {
+    'tab': '\t',
+    'nl': '\n'
+}
+
+CONDITION = {
+    'ne': lambda var, expVal: var != expVal,
+    'eq': lambda var, expVal: var == expVal,
+    'sw': lambda var, expVal: var.startswith(expVal),
+    'snw': lambda var, expVal: not var.startswith(expVal),
+    'ew': lambda var, expVal: var.endswith(expVal),
+    'enw': lambda var, expVal: not var.endswith(expVal),
+    'in': lambda var, expVal: var in expVal,
+    'nin': lambda var, expVal: var not in expVal
+}
+
+REGEX = {
+    'name': re.compile(r'[^:]+'),
+    'strings': re.compile(r'[^:]+'),
+    'ftype': re.compile(r'.[^.]+'),
+    'ldb': re.compile(r'[^;]+')
+}
+
+REGEX_SUB_EXPRESSIONS ={
+    'AAXY': re.compile(r'\([^\(\)]+\)[<>=]{1}[\d]+[,]{0,1}[\d]*'),     # A>X,Y | A>X | A<X | A<X,Y   A 是一个(逻辑)签名块
+    'AXY': re.compile(r'\d+[<>=]{1}[\d]+[,]{0,1}[\d]*'),              # 同上, A指向单个签名
+
+    # 'AAeqXY': re.compile(r'\([^\(\)]+\)=[\d]+[,]{0,1}[\d]*'),     # A=X | A=0 | A=X,Y   A 是一个(逻辑)签名块
+    'AeqXY': re.compile(r'\d+=[\d]+[,]{0,1}[\d]*'),              # 同上, A指向单个签名
+}
+
+PRINTABLE = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~ \t"
+
+
 # DOWNLOAD CLAMAV VIRUS DATABASE AND EXTRACT DATA
 def download(url, dbfile):
     with open(dbfile, "wb") as db:
@@ -124,11 +167,10 @@ def logic_len(logic):
     return subsig_count
 
 # REFORMAT LDB STRING TO YARA
-def formatLDB(string_t, index=0, multi=False):
+def formatLDB(string_t, index=0):
     """
     string_t: SubsigN
     index:  上面SubsigN 中的 N. 从0开始
-    multi: 是否包含 sub_signatures 如果为True, 以*分割出来
     return: (SubsigN, {"EOF":(N, m, n), "EP":position})
     如果 SubsigN 以 EOF-m,n 开头 则返回值中有 "EOF":(N, m, n)
     如果 SubsigN 以 EP[+-]{1}开头 则返回值中有 "EP":position
@@ -157,7 +199,8 @@ def formatLDB(string_t, index=0, multi=False):
     string_t = repl(string_t, {
         "{": "[",
         "}": "]",
-        "[-": "[0-"
+        "[-": "[0-",
+        "*": "[-]"      # Starting with YARA 2.0 you can also use unbounded jumps:
     })
     if string_t.endswith("]"):
         string_t = re.sub(r'\[\d+\-?\d*\]$', '', string_t)
@@ -188,59 +231,25 @@ def formatLDB(string_t, index=0, multi=False):
                 s.append("nocase")
                 continue
         modifiers = " ".join(s)
-        if multi:
-            strings = string_t.split("*")
-            sub_signatures = [handle_hex(_) for _ in strings]
-            arr = []
-            for i in range(0, len(sub_signatures)):
-                sub_signature = sub_signatures[i]
-                string_t = sub_signature.replace("\"", "\\\"")
-                string_t = repl(string_t, {
-                    "\\": "\\\\",
-                    "\"": "\\\""
-                })
-                res = f"\"{del_invisiable(string_t)}\" {modifiers}"
-                res = f"{2*FORMAT['tab']}$a{index}_{i} = {res}"
-                arr.append(res)
-            return FORMAT['nl'].join(arr), condition_ex
-        else:
-            string_t = handle_hex(hexstring)
-            string_t = string_t.replace("\"", "\\\"")
-            string_t = repl(string_t, {
-                "\\": "\\\\",
-                "\"": "\\\""
-            })
+        
+        string_t = handle_hex(hexstring)
+        string_t = string_t.replace("\"", "\\\"")
+        string_t = repl(string_t, {
+            "\\": "\\\\",
+            "\"": "\\\""
+        })
 
-            res = f"\"{del_invisiable(string_t)}\" {modifiers}"
-            return f"{2*FORMAT['tab']}$a{index} = {res}", condition_ex
+        res = f"\"{del_invisiable(string_t)}\" {modifiers}"
+        return f"{2*FORMAT['tab']}$a{index} = {res}", condition_ex
     else:
-        if multi:
-            sub_signatures = string_t.split("*")
-            arr = []
-            for i in range(0, len(sub_signatures)):
-                sub_signature = sub_signatures[i]
-                string_t = sub_signature.replace("\"", "\\\"")
-                string_t = repl(string_t, {
-                    "\\": "\\\\",
-                    "\"": "\\\""
-                })
-                if is_hex(string_t=string_t):
-                    res = f"{{ {string_t} }}"
-                else:
-                    res = f"\"{del_invisiable(string_t)}\""
-
-                res = f"{2*FORMAT['tab']}$a{index}_{i} = {res}"
-                arr.append(res)
-            return FORMAT['nl'].join(arr), condition_ex
+        if is_hex(string_t=string_t):
+            res = f"{{ {string_t} }}"
         else:
-            if is_hex(string_t=string_t):
-                res = f"{{ {string_t} }}"
-            else:
-                res = f"\"{del_invisiable(string_t)}\""
-            return f"{2*FORMAT['tab']}$a{index} = {res}", condition_ex
+            res = f"\"{del_invisiable(string_t)}\""
+        return f"{2*FORMAT['tab']}$a{index} = {res}", condition_ex
 
 
-def handle_AXY(string_t, subsig_info=None):
+def handle_AXY(string_t):
     # 注意 = 要替换成 == 
     # 1>20  1<20    2=0
     # 转换成    #a>20    #a1<20    #a2==0
@@ -252,16 +261,9 @@ def handle_AXY(string_t, subsig_info=None):
         matches = re.findall(regex, string_t)
         index,spliter,X,Y = matches[0][0], matches[0][1], matches[0][2], matches[0][3]
         if DEBUG: print("index,spliter,X,Y ", index,spliter,X,Y)
-        if subsig_info and int(index) in subsig_info:
-            # for all of ($a*) : ( # > 3 )
-            res = f"for all of ($a{index}_*) : ( # {spliter} {X} )"
-            if len(Y) > 0:
-                res += f" and {Y} of $a{index}_*"
-            res = res.replace("=", "==")
-            return f"({res})"
-        else:
-            string_t = regex.sub('#a\g<0>', string_t)
-            return string_t.replace("=", "==")
+
+        string_t = regex.sub('#a\g<0>', string_t)
+        return string_t.replace("=", "==")
 
     # (0|1|2|3)>1,2
     # 转换成 for all of ($a0, $a1, $a2, $a3): (# > 1) and 2 of ($a0, $a1, $a2, $a3)
@@ -285,14 +287,14 @@ def handle_AXY(string_t, subsig_info=None):
     return res.replace("=", "==")
 
 
-def get_next_sub_expressions(string_t, subsig_info=None):
+def get_next_sub_expressions(string_t):
     regex = REGEX_SUB_EXPRESSIONS['AAXY']
     matches = re.findall(regex, string_t)
     if len(matches) > 0:
         expressions = matches[0]
         pre = string_t[:string_t.find(expressions)]
         after = string_t[string_t.find(expressions)+len(expressions):]
-        return f"{get_next_sub_expressions(pre, subsig_info)}{handle_AXY(expressions, subsig_info)}{get_next_sub_expressions(after, subsig_info)}"
+        return f"{get_next_sub_expressions(pre)}{handle_AXY(expressions)}{get_next_sub_expressions(after)}"
     else:
         regex = REGEX_SUB_EXPRESSIONS['AXY']
         matches = re.findall(regex, string_t)
@@ -300,7 +302,7 @@ def get_next_sub_expressions(string_t, subsig_info=None):
             expressions = matches[0]
             pre = string_t[:string_t.find(expressions)]
             after = string_t[string_t.find(expressions)+len(expressions):]
-            return f"{get_next_sub_expressions(pre, subsig_info)}{handle_AXY(expressions, subsig_info)}{get_next_sub_expressions(after, subsig_info)}"
+            return f"{get_next_sub_expressions(pre)}{handle_AXY(expressions)}{get_next_sub_expressions(after)}"
         else:
             regex = REGEX_SUB_EXPRESSIONS['AeqXY']
             matches = re.findall(regex, string_t)
@@ -308,15 +310,11 @@ def get_next_sub_expressions(string_t, subsig_info=None):
                 expressions = matches[0]
                 pre = string_t[:string_t.find(expressions)]
                 after = string_t[string_t.find(expressions)+len(expressions):]
-                return f"{get_next_sub_expressions(pre, subsig_info)}{handle_AXY(expressions, subsig_info)}{get_next_sub_expressions(after, subsig_info)}"
+                return f"{get_next_sub_expressions(pre)}{handle_AXY(expressions)}{get_next_sub_expressions(after)}"
             else:
                 regex = re.compile('[\d]+')
                 string_t = regex.sub('$a\g<0>', string_t)
                 # Subsig with sub-signatures
-                if subsig_info:
-                    for index in subsig_info:
-                        condition = "$a%s" % index
-                        string_t = string_t.replace(condition, "(1 of ($a%s_*))"%index)
                 return repl(string_t, {
                             "|": " or ",
                             "&": " and "
@@ -324,14 +322,14 @@ def get_next_sub_expressions(string_t, subsig_info=None):
 
 
 # REFORMAT LDB LOGIC TO YARA CONDITION
-def format_logic(string_t, subsig_info=None):
+def format_logic(string_t):
     # format weird logics
-    if DEBUG: print("format_logic", string_t, subsig_info)
+    if DEBUG: print("format_logic", string_t)
     string_t = re.sub(r'[a-z]+', '', string_t)  # drop the 'i' in 0:(0&1&2&3i)|4
     string_t = re.sub(r'\s+', '', string_t)     # drop space in 0& 1 > 200
     if string_t.find(":") != -1:              # drop the ':' in 0:(0&1&2&3i)|4
         string_t = string_t.split(":")[1]
-    yara_condition = get_next_sub_expressions(string_t, subsig_info)
+    yara_condition = get_next_sub_expressions(string_t)
     return yara_condition
 
 
@@ -387,7 +385,7 @@ def convertLDB(line):
     # 排除类似的logic: 0,1-4&1,1-4&2,1-4
     if logic.find("-") != -1:
         return ""
-    # 有些ldb子规则很多，但是logic中就只有一个0,因此要将其补齐.例如 subsigs有3个，就补齐成 0&1&2
+    # 有些ldb特征很多，但是logic中就只有一个0,因此要将其补齐.例如 subsigs有3个，就补齐成 0&1&2
     # 感觉不对劲，后面继续看看文档吧
     if len(logic) < len(subsigs[3:]):
         if len(logic) == 1:
@@ -404,22 +402,11 @@ def convertLDB(line):
     if subsigs_count != len(subsigs[3:]):
         return ""
 
-    # 记录第几条Subsig中包含sub-signatures
-    # sub-signatures 是以 * 分隔开的
-    subsig_info = []
-    for index in range(3, len(subsigs)):
-        Subsig = subsigs[index]
-        # 只要有 / 就认为是正则
-        if Subsig.find("/") == -1 and Subsig.find("*") > 0:
-            # with open("subsigs.ldb", "a") as f:
-            #     f.writelines([line])
-            subsig_info.append(index-3)
-
     yara_name = repl(name, {'.': '_', '-': '_', '/': '_'})
-    yara_condition = format_logic(logic, subsig_info=subsig_info) + format_target(TargetDescriptionBlock)
+    yara_condition = format_logic(logic) + format_target(TargetDescriptionBlock)
     ldbs = []
     for i in range(len(strings)):
-        ldbs.append(formatLDB(strings[i], index=i, multi=(i in subsig_info)))
+        ldbs.append(formatLDB(strings[i], index=i))
 
     yara_rules = []
     for _ in ldbs:
@@ -548,58 +535,6 @@ rule {repl(name, {'.': '_', '-': '_', '/': '_'})}
 
     return rule
 
-
-# VARIABLES
-INPUT = None
-OUTPUT = None
-TYPE = None
-URL = "http://database.clamav.net/daily.cvd"
-DB_FILE = "daily.cvd"
-EXTENSIONS = ['.ndu', '.ndb', '.hdb', '.hsb', '.ldb']
-
-
-# SETTINGS
-MODES = {
-    'LDB': convertLDB,
-    'NDU': convertNDU,
-    'NDB': convertNDB,
-    'HDB': convertHDB,
-    'HSB': convertHSB
-}
-
-CONDITION = {
-    'ne': lambda var, expVal: var != expVal,
-    'eq': lambda var, expVal: var == expVal,
-    'sw': lambda var, expVal: var.startswith(expVal),
-    'snw': lambda var, expVal: not var.startswith(expVal),
-    'ew': lambda var, expVal: var.endswith(expVal),
-    'enw': lambda var, expVal: not var.endswith(expVal),
-    'in': lambda var, expVal: var in expVal,
-    'nin': lambda var, expVal: var not in expVal
-}
-
-REGEX = {
-    'name': re.compile(r'[^:]+'),
-    'strings': re.compile(r'[^:]+'),
-    'ftype': re.compile(r'.[^.]+'),
-    'ldb': re.compile(r'[^;]+')
-}
-
-REGEX_SUB_EXPRESSIONS ={
-    'AAXY': re.compile(r'\([^\(\)]+\)[<>=]{1}[\d]+[,]{0,1}[\d]*'),     # A>X,Y | A>X | A<X | A<X,Y   A 是一个(逻辑)签名块
-    'AXY': re.compile(r'\d+[<>=]{1}[\d]+[,]{0,1}[\d]*'),              # 同上, A指向单个签名
-
-    # 'AAeqXY': re.compile(r'\([^\(\)]+\)=[\d]+[,]{0,1}[\d]*'),     # A=X | A=0 | A=X,Y   A 是一个(逻辑)签名块
-    'AeqXY': re.compile(r'\d+=[\d]+[,]{0,1}[\d]*'),              # 同上, A指向单个签名
-}
-
-FORMAT = {
-    'tab': '\t',
-    'nl': '\n'
-}
-
-PRINTABLE = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~ \t"
-
 # WRITE RULE TO OUTFILE
 def write(outfile, rule):
     with open(outfile, 'a') as of:
@@ -611,6 +546,14 @@ def setup(filename):
     with open(filename, 'w') as yara:
         yara.write("import \"hash\"\n")
 
+# SETTINGS
+MODES = {
+    'LDB': convertLDB,
+    'NDU': convertNDU,
+    'NDB': convertNDB,
+    'HDB': convertHDB,
+    'HSB': convertHSB
+}
 
 # ARGPARSE
 parser = argparse.ArgumentParser()
@@ -648,10 +591,10 @@ if args.i and args.o:
             yara_rule = MODES[TYPE](line)
             if len(yara_rule) > 1:
                 write(OUTPUTFILE, yara_rule)
+                status("Converted", c+1, limit, 100)
+                c += 1
             else:
                 write('error.ldb', line)
-            status("Converted", c+1, limit, 100)
-            c += 1
 
 elif args.a:
     for t in EXTENSIONS:
@@ -662,9 +605,11 @@ elif args.a:
         with open(INPUT, 'r') as f:
             c = 1
             for line in f:
-                write(OUTPUT, MODES[TYPE](line))
-                status("Converted " + TYPE, c, limit, 100)
-                c += 1
+                yara_rule = MODES[TYPE](line)
+                if len(yara_rule) > 1:
+                    write(OUTPUT, yara_rule)
+                    status("Converted " + TYPE, c, limit, 100)
+                    c += 1
 elif args.m:
     merge()
 
