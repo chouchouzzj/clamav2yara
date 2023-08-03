@@ -7,7 +7,7 @@ Date last modified: 8/1/2023
 Python Version: 3.8.10
 '''
 
-DEBUG = False
+DEBUG = True
 import subprocess
 import argparse
 import requests
@@ -17,7 +17,15 @@ import re
 import os
 from ignored import *
 
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(level = logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+handler = logging.FileHandler("log.txt")
+handler.setLevel(logging.INFO)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # VARIABLES
 INPUT = None
@@ -156,15 +164,26 @@ def del_invisiable(string_t):
     })
 
 def logic_len(logic):
+    """
+    注意logic是从0开始的, 算长度得加1
+    """
     regex_l = re.compile(r'[\d]+')
     matches = re.findall(regex_l, logic)
-    subsig_count = 0
-    for i in range(0, 65):
-        if str(i) in matches:
-            subsig_count = i+1
+    nums = set()
+    for _ in matches:
+        pos = logic.find(_)
+        if pos == 0:
+            nums.add(int(_))
         else:
-            break
-    return subsig_count
+            if logic[pos - 1] not in ['=', '>', '<']:
+                nums.add(int(_))
+        logic = logic[pos+1:]
+    nums = list(nums)
+    nums.sort()
+    if len(nums) == nums[-1]+1:
+        return nums[-1]+1
+    else:
+        return 1
 
 # REFORMAT LDB STRING TO YARA
 def formatLDB(string_t, index=0):
@@ -259,7 +278,7 @@ def handle_AXY(string_t):
         regex = re.compile('([\d]+)([<>=]{1})([\d]+)[,]{0,1}([\d]*)')
         matches = re.findall(regex, string_t)
         index,spliter,X,Y = matches[0][0], matches[0][1], matches[0][2], matches[0][3]
-        if DEBUG: print("index,spliter,X,Y ", index,spliter,X,Y)
+        # if DEBUG: logger.info("index:[%s],spliter:[%s],X:[%s],Y :[%s]"% (index,spliter,X,Y))
 
         string_t = regex.sub('#a\g<0>', string_t)
         return string_t.replace("=", "==")
@@ -323,7 +342,7 @@ def get_next_sub_expressions(string_t):
 # REFORMAT LDB LOGIC TO YARA CONDITION
 def format_logic(string_t):
     # format weird logics
-    if DEBUG: print("format_logic", string_t)
+    # if DEBUG: logger.info("format_logic:[%s]" % string_t)
     string_t = re.sub(r'[a-z]+', '', string_t)  # drop the 'i' in 0:(0&1&2&3i)|4
     string_t = re.sub(r'\s+', '', string_t)     # drop space in 0& 1 > 200
     if string_t.find(":") != -1:              # drop the ':' in 0:(0&1&2&3i)|4
@@ -362,9 +381,10 @@ def convertLDB(line):
     if len(subsigs) < 4:
         return ""
     
-    name, TargetDescriptionBlock, logic, strings = subsigs[0], subsigs[1], subsigs[2], subsigs[3:]
+    name, TargetDescriptionBlock, logic, strings = subsigs[0], subsigs[1], subsigs[2].replace(" ", ""), subsigs[3:]
 
     if name in IGNORED_LDB:
+        if DEBUG: logger.info("IGNORED_LDB:[%s]" % name)
         return ""
 
     # 排除带有宏子规则(Macro subsignatures)的
@@ -379,10 +399,12 @@ def convertLDB(line):
         #     if int(value_min) == 51:
         #         return ""
         if BlockName == "Container":
+            if DEBUG: logger.info("Container[%s]" % name)
             return ""
 
     # 排除类似的logic: 0,1-4&1,1-4&2,1-4
     if logic.find("-") != -1:
+        if DEBUG: logger.info("wired logic[%s] -[%s]" % (name, logic))
         return ""
     # 有些ldb特征很多，但是logic中就只有一个0,因此要将其补齐.例如 subsigs有3个，就补齐成 0&1&2
     # 感觉不对劲，后面继续看看文档吧
@@ -393,12 +415,14 @@ def convertLDB(line):
                 logics.append(str(i))
             logic = "&".join(logics)
         else:
+            if DEBUG: logger.info("logic count error[%s] - [%s]" % (name, logic))
             return ""
     
     # 排除某些logic不包含规则集中的某一条 例如 缺少 $a0. 
     # 不过，要先执行上面的补齐操作
     subsigs_count = logic_len(logic=logic)
     if subsigs_count != len(subsigs[3:]):
+        if DEBUG: logger.info("logic missing[%s] - [%s]" % (name, logic))
         return ""
 
     yara_name = repl(name, {'.': '_', '-': '_', '/': '_'})
